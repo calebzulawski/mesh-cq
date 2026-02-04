@@ -1,0 +1,6 @@
+[workspace]
+members = [
+  "crates/meshcq",
+  "crates/meshcq-modem",
+]
+resolver = "2"
