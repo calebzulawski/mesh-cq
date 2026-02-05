@@ -1,6 +1,7 @@
 [workspace]
 members = [
-  "crates/meshcq",
+  "crates/meshcq-simplex-repeater",
   "crates/meshcq-modem",
+  "crates/meshcq-cw",
 ]
 resolver = "2"

@@ -1,0 +1,10 @@
+[package]
+name = "meshcq-simplex-repeater"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bitvec = "1"
+clap = { version = "4", features = ["derive"] }
+meshcq-modem = { path = "../meshcq-modem" }
+meshcq-cw = { path = "../meshcq-cw" }

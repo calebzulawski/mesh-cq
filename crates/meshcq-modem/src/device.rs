@@ -123,13 +123,23 @@ pub fn start_default_output(left_rx: Receiver<Vec<f32>>) -> Result<cpal::Stream,
 
     let err_fn = |err| eprintln!("audio stream error: {}", err);
 
+    let mut pending: VecDeque<f32> = VecDeque::new();
+
     let stream = match sample_format {
         cpal::SampleFormat::F32 => device.build_output_stream(
             &config,
             move |data: &mut [f32], _| {
+                while let Some(sample) = pending.front().copied() {
+                    if producer.push(sample).is_ok() {
+                        pending.pop_front();
+                    } else {
+                        break;
+                    }
+                }
+
                 while let Ok(chunk) = left_rx.try_recv() {
                     for sample in chunk {
-                        let _ = producer.push(sample);
+                        pending.push_back(sample);
                     }
                 }
 

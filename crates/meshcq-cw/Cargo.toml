@@ -1,0 +1,8 @@
+[package]
+name = "meshcq-cw"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bitvec = "1"
+phf = { version = "0.11", features = ["macros"] }
