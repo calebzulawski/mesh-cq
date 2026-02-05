@@ -2,22 +2,13 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::collections::VecDeque;
 use ringbuf::HeapRb;
 use std::sync::{mpsc::Receiver, mpsc::Sender};
-use std::thread;
 
 const ENERGY_BLOCK: usize = 1024;
 const CONCAT_BLOCKS: usize = 3;
 const ENERGY_THRESHOLD: f32 = 1.0e-4;
 const OUTPUT_RING_CAP: usize = 48_000 * 4;
 
-pub fn start_default_input_thread(left_tx: Sender<Vec<f32>>) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
-        if let Err(err) = run_default_input(left_tx) {
-            eprintln!("audio input thread error: {}", err);
-        }
-    })
-}
-
-fn run_default_input(left_tx: Sender<Vec<f32>>) -> Result<cpal::Stream, Box<dyn std::error::Error>> {
+pub fn start_default_input(left_tx: Sender<Vec<f32>>) -> Result<cpal::Stream, Box<dyn std::error::Error>> {
     let host = cpal::default_host();
     let device = host
         .default_input_device()
@@ -109,19 +100,10 @@ fn run_default_input(left_tx: Sender<Vec<f32>>) -> Result<cpal::Stream, Box<dyn 
     };
 
     stream.play()?;
-    std::thread::park();
     Ok(stream)
 }
 
-pub fn start_default_output_thread(left_rx: Receiver<Vec<f32>>) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
-        if let Err(err) = run_default_output(left_rx) {
-            eprintln!("audio output thread error: {}", err);
-        }
-    })
-}
-
-fn run_default_output(left_rx: Receiver<Vec<f32>>) -> Result<cpal::Stream, Box<dyn std::error::Error>> {
+pub fn start_default_output(left_rx: Receiver<Vec<f32>>) -> Result<cpal::Stream, Box<dyn std::error::Error>> {
     let host = cpal::default_host();
     let device = host
         .default_output_device()
@@ -145,6 +127,12 @@ fn run_default_output(left_rx: Receiver<Vec<f32>>) -> Result<cpal::Stream, Box<d
         cpal::SampleFormat::F32 => device.build_output_stream(
             &config,
             move |data: &mut [f32], _| {
+                while let Ok(chunk) = left_rx.try_recv() {
+                    for sample in chunk {
+                        let _ = producer.push(sample);
+                    }
+                }
+
                 for frame in data.chunks_mut(channels) {
                     let left_opt = consumer.pop();
                     let left = left_opt.unwrap_or(0.0);
@@ -173,10 +161,5 @@ fn run_default_output(left_rx: Receiver<Vec<f32>>) -> Result<cpal::Stream, Box<d
     };
 
     stream.play()?;
-    loop {
-        let chunk = left_rx.recv()?;
-        for sample in chunk {
-            let _ = producer.push(sample);
-        }
-    }
+    Ok(stream)
 }
