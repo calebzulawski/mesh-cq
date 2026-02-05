@@ -6,5 +6,6 @@ edition = "2021"
 [dependencies]
 bitvec = "1"
 clap = { version = "4", features = ["derive"] }
+cpal = "0.15"
 meshcq-modem = { path = "../meshcq-modem" }
 meshcq-cw = { path = "../meshcq-cw" }

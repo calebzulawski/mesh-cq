@@ -8,7 +8,12 @@ const CONCAT_BLOCKS: usize = 3;
 const ENERGY_THRESHOLD: f32 = 1.0e-4;
 const OUTPUT_RING_CAP: usize = 48_000 * 4;
 
-pub fn start_default_input(left_tx: Sender<Vec<f32>>) -> Result<cpal::Stream, Box<dyn std::error::Error>> {
+pub struct TimedChunk {
+    pub samples: Vec<f32>,
+    pub end: cpal::StreamInstant,
+}
+
+pub fn start_default_input(left_tx: Sender<TimedChunk>) -> Result<cpal::Stream, Box<dyn std::error::Error>> {
     let host = cpal::default_host();
     let device = host
         .default_input_device()
@@ -45,7 +50,16 @@ pub fn start_default_input(left_tx: Sender<Vec<f32>>) -> Result<cpal::Stream, Bo
     let stream = match sample_format {
         cpal::SampleFormat::F32 => device.build_input_stream(
             &config,
-            move |data: &[f32], _| {
+            move |data: &[f32], info| {
+                let frames = data.len() / channels;
+                let buffer_duration =
+                    std::time::Duration::from_secs_f64(frames as f64 / config.sample_rate.0 as f64);
+                let buffer_end = info
+                    .timestamp()
+                    .capture
+                    .add(buffer_duration)
+                    .unwrap_or(info.timestamp().capture);
+
                 let mut process_block = |block: &mut Vec<f32>| {
                     let energy = block.iter().map(|x| x * x).sum::<f32>()
                         / ENERGY_BLOCK as f32;
@@ -67,7 +81,10 @@ pub fn start_default_input(left_tx: Sender<Vec<f32>>) -> Result<cpal::Stream, Bo
                         message.extend_from_slice(block);
                     } else if !message.is_empty() {
                         let to_send = std::mem::take(&mut message);
-                        let _ = left_tx.send(to_send);
+                        let _ = left_tx.send(TimedChunk {
+                            samples: to_send,
+                            end: buffer_end,
+                        });
                     }
 
                     block.clear();
