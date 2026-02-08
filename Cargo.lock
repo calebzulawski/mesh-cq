@@ -500,6 +500,7 @@ name = "meshcq-modem"
 version = "0.1.0"
 dependencies = [
  "cpal",
+ "regex",
  "ringbuf",
  "rustfft",
 ]
@@ -510,7 +511,6 @@ version = "0.1.0"
 dependencies = [
  "bitvec",
  "clap",
- "cpal",
  "meshcq-cw",
  "meshcq-modem",
 ]

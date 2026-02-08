@@ -9,4 +9,5 @@ path = "src/lib.rs"
 [dependencies]
 cpal = "0.15"
 ringbuf = "0.3"
+regex = "1"
 rustfft = "6.2"
