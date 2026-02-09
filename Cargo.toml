@@ -3,6 +3,7 @@ members = [
   "crates/meshcq-simplex-repeater",
   "crates/meshcq-modem",
   "crates/meshcq-cw",
+  "crates/meshcq-dtmf",
 ]
 resolver = "2"
 

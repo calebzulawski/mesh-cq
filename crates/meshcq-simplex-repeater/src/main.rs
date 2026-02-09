@@ -1,4 +1,5 @@
 use clap::Parser;
+use meshcq_dtmf::DtmfDebouncer;
 
 mod callsign;
 use meshcq_modem::device::TimedChunk;
@@ -58,6 +59,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         level,
     )?;
 
+    let mut dtmf = DtmfDebouncer::builder(SAMPLE_RATE_HZ).build();
+
     let mut last_id: Option<u64> = None;
     let mut last_message_end: Option<u64> = None;
     let mut state = RepeaterState::Idle;
@@ -73,7 +76,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(message) => message,
             None => {
                 if let Some(end) = last_message_end {
-                    let idle = std::time::Duration::from_secs(ID_IDLE_SECS);
                     let now = end.saturating_add(samples_from_secs(ID_IDLE_SECS as f32));
                     let len = transmit_callsign(&callsign_samples, &output_tx);
                     last_id = Some(now.saturating_add(len as u64));
@@ -82,6 +84,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
         };
+
+        for (ch, _, _) in dtmf.push(&message.samples) {
+            eprintln!("dtmf: {}", ch);
+        }
 
         last_message_end = Some(message.end_sample);
         let result = transmit_message(

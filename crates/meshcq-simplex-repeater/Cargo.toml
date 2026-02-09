@@ -8,3 +8,4 @@ bitvec = "1"
 clap = { version = "4", features = ["derive"] }
 meshcq-modem = { path = "../meshcq-modem" }
 meshcq-cw = { path = "../meshcq-cw" }
+meshcq-dtmf = { path = "../meshcq-dtmf" }

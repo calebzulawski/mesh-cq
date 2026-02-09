@@ -496,6 +496,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "meshcq-dtmf"
+version = "0.1.0"
+
+[[package]]
 name = "meshcq-modem"
 version = "0.1.0"
 dependencies = [
@@ -512,6 +516,7 @@ dependencies = [
  "bitvec",
  "clap",
  "meshcq-cw",
+ "meshcq-dtmf",
  "meshcq-modem",
 ]
 
