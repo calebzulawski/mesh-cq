@@ -2,6 +2,7 @@ use clap::Parser;
 use meshcq_dtmf::DtmfDebouncer;
 
 mod callsign;
+mod noise;
 mod recording;
 use meshcq_modem::device::TimedChunk;
 use recording::{latest_recording_path, read_recording, write_recording};
@@ -81,7 +82,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let message = read_message(&input_rx, timeout)?;
 
-        let message = match message {
+        let mut message = match message {
             Some(message) => message,
             None => {
                 if let Some(end) = last_message_end {
@@ -94,6 +95,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
+        dtmf.reset();
         let message_start = message
             .end_sample
             .saturating_sub(message.samples.len() as u64);
@@ -105,6 +107,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &callsign_samples,
             &output_tx,
         );
+        suppress_dtmf(&mut message.samples, &events);
         if let Err(err) = write_recording(&args.recordings_dir, SAMPLE_RATE_HZ, &message.samples) {
             eprintln!("recording failed: {}", err);
         }
@@ -243,6 +246,41 @@ fn build_transmit_message(
     }
     out.extend(std::iter::repeat_n(0.0, hang_samples));
     out
+}
+
+fn suppress_dtmf(samples: &mut [f32], events: &[(char, usize, usize)]) {
+    if events.is_empty() {
+        return;
+    }
+    let mut ranges = collect_event_ranges(samples.len(), events);
+    if ranges.is_empty() {
+        return;
+    }
+    ranges.sort_unstable_by_key(|r| r.0);
+    let window_len = samples_from_secs(0.02) as usize;
+    let noise_level = noise::estimate_floor(samples, &ranges, window_len);
+    let cutoff_hz = 3000.0;
+    for (start, end) in ranges {
+        noise::fill_band_limited_gaussian_noise(
+            &mut samples[start..end],
+            noise_level,
+            SAMPLE_RATE_HZ,
+            cutoff_hz,
+        );
+    }
+}
+
+fn collect_event_ranges(len: usize, events: &[(char, usize, usize)]) -> Vec<(usize, usize)> {
+    events
+        .iter()
+        .filter_map(|&(_, start, end)| {
+            if start >= len {
+                return None;
+            }
+            let end = end.min(len.saturating_sub(1));
+            Some((start, end.saturating_add(1)))
+        })
+        .collect()
 }
 
 fn handle_dtmf_commands(
