@@ -2,7 +2,10 @@ use clap::Parser;
 use meshcq_dtmf::DtmfDebouncer;
 
 mod callsign;
+mod recording;
 use meshcq_modem::device::TimedChunk;
+use recording::{latest_recording_path, read_recording, write_recording};
+use std::path::PathBuf;
 
 const SAMPLE_RATE_HZ: f32 = 48_000.0;
 const TONE_FREQ_HZ: f32 = 700.0;
@@ -15,6 +18,8 @@ const CONTINUITY_GAP_SECS: f32 = 1.0;
 const TX_LEAD_TIME_SECS: f32 = 0.2;
 const TX_HANG_TIME_SECS: f32 = 1.0;
 const DEFAULT_OUTPUT_LEVEL: f32 = 0.5;
+const DEFAULT_RECORDINGS_DIR: &str = "recordings";
+const DTMF_COMMAND_GAP_SECS: f32 = 2.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RepeaterState {
@@ -38,10 +43,14 @@ struct Args {
     /// Regex to select input/output device by name.
     #[arg(long)]
     sound_device: Option<String>,
+    /// Directory to store received messages as Ogg Opus.
+    #[arg(long, default_value = DEFAULT_RECORDINGS_DIR)]
+    recordings_dir: PathBuf,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
+    std::fs::create_dir_all(&args.recordings_dir)?;
 
     let (input_tx, input_rx) = std::sync::mpsc::channel();
     let (output_tx, output_rx) = std::sync::mpsc::channel();
@@ -85,8 +94,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
-        for (ch, _, _) in dtmf.push(&message.samples) {
-            eprintln!("dtmf: {}", ch);
+        let message_start = message
+            .end_sample
+            .saturating_sub(message.samples.len() as u64);
+        let events = dtmf.push(&message.samples);
+        handle_dtmf_commands(
+            &events,
+            message_start,
+            &args.recordings_dir,
+            &callsign_samples,
+            &output_tx,
+        );
+        if let Err(err) = write_recording(&args.recordings_dir, SAMPLE_RATE_HZ, &message.samples) {
+            eprintln!("recording failed: {}", err);
         }
 
         last_message_end = Some(message.end_sample);
@@ -223,4 +243,54 @@ fn build_transmit_message(
     }
     out.extend(std::iter::repeat_n(0.0, hang_samples));
     out
+}
+
+fn handle_dtmf_commands(
+    events: &[(char, usize, usize)],
+    message_start: u64,
+    recordings_dir: &std::path::Path,
+    callsign_samples: &[f32],
+    output_tx: &std::sync::mpsc::Sender<Vec<f32>>,
+) {
+    let sequences = split_dtmf_sequences(events, message_start);
+    if !sequences.iter().any(|seq| seq.contains("##")) {
+        return;
+    }
+    let Some(path) = latest_recording_path(recordings_dir) else {
+        eprintln!("dtmf: no recordings found");
+        return;
+    };
+    match read_recording(&path, SAMPLE_RATE_HZ) {
+        Ok(samples) => {
+            let out = build_transmit_message(&samples, callsign_samples, false);
+            let _ = output_tx.send(out);
+        }
+        Err(err) => {
+            eprintln!("dtmf: failed to replay {}: {}", path.display(), err);
+        }
+    }
+}
+
+fn split_dtmf_sequences(events: &[(char, usize, usize)], message_start: u64) -> Vec<String> {
+    let mut sequences = Vec::new();
+    let mut current = String::new();
+    let mut last_end: Option<u64> = None;
+    let gap_limit = samples_from_secs(DTMF_COMMAND_GAP_SECS);
+
+    for &(ch, _, end) in events {
+        let abs_end = message_start.saturating_add(end as u64);
+        if let Some(last) = last_end {
+            if abs_end.saturating_sub(last) > gap_limit && !current.is_empty() {
+                sequences.push(current.clone());
+                current.clear();
+            }
+        }
+        current.push(ch);
+        last_end = Some(abs_end);
+    }
+
+    if !current.is_empty() {
+        sequences.push(current);
+    }
+    sequences
 }

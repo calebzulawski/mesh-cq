@@ -113,7 +113,7 @@ fn goertzel_finish<const N: usize>(s1: [f32; N], s2: [f32; N], coeffs: [f32; N])
 
 fn top_two(values: &[f32]) -> Option<(usize, f32, f32)> {
     let mut max_i = 0;
-    let mut max_v = values.get(0).copied()?;
+    let mut max_v = values.first().copied()?;
     let mut next_v = f32::MIN;
 
     for (i, &v) in values.iter().enumerate().skip(1) {
