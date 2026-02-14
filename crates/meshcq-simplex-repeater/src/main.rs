@@ -5,7 +5,10 @@ mod callsign;
 mod noise;
 mod recording;
 use meshcq_modem::device::TimedChunk;
-use recording::{latest_recording_path, read_recording, write_recording};
+use recording::{
+    format_timestamp_filename, latest_recording_path, read_recording, recording_metadata,
+    write_recording, write_recording_to,
+};
 use std::path::PathBuf;
 
 const SAMPLE_RATE_HZ: f32 = 48_000.0;
@@ -21,6 +24,9 @@ const TX_HANG_TIME_SECS: f32 = 1.0;
 const DEFAULT_OUTPUT_LEVEL: f32 = 0.5;
 const DEFAULT_RECORDINGS_DIR: &str = "recordings";
 const DTMF_COMMAND_GAP_SECS: f32 = 2.0;
+const MAILBOX_BEEP_SECS: f32 = 0.5;
+const MAILBOX_BEEP_FREQ_HZ: f32 = 1000.0;
+const MAILBOX_BEEP_LEVEL: f32 = 0.3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RepeaterState {
@@ -31,6 +37,16 @@ enum RepeaterState {
 struct TransmitResult {
     sent_callsign: bool,
     transmission_end_sample: u64,
+}
+
+enum MailboxCommand {
+    Record(u8),
+    Play(u8),
+    ReplayLast,
+}
+
+struct MailboxState {
+    pending_record: Option<u8>,
 }
 
 #[derive(Parser, Debug)]
@@ -74,6 +90,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_id: Option<u64> = None;
     let mut last_message_end: Option<u64> = None;
     let mut state = RepeaterState::Idle;
+    let mut mailbox = MailboxState { pending_record: None };
 
     loop {
         let timeout = match state {
@@ -95,19 +112,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
+        let record_target = mailbox.pending_record.take();
         dtmf.reset();
         let message_start = message
             .end_sample
             .saturating_sub(message.samples.len() as u64);
         let events = dtmf.push(&message.samples);
-        handle_dtmf_commands(
-            &events,
-            message_start,
-            &args.recordings_dir,
-            &callsign_samples,
-            &output_tx,
-        );
+        let sequences = split_dtmf_sequences(&events, message_start);
+        for seq in &sequences {
+            eprintln!("dtmf seq: {}", seq);
+        }
+        let commands = parse_commands(&sequences);
+        if !commands.is_empty() {
+            for cmd in &commands {
+                match cmd {
+                    MailboxCommand::Record(digit) => {
+                        eprintln!("dtmf cmd: record {}", digit);
+                        mailbox.pending_record = Some(*digit);
+                        send_beep(&output_tx);
+                    }
+                    MailboxCommand::Play(digit) => {
+                        eprintln!("dtmf cmd: play {}", digit);
+                        replay_mailbox(*digit, &args.recordings_dir, &callsign_samples, &output_tx);
+                    }
+                    MailboxCommand::ReplayLast => {
+                        eprintln!("dtmf cmd: replay last");
+                        replay_latest(
+                            &args.recordings_dir,
+                            &callsign_samples,
+                            &output_tx,
+                        );
+                    }
+                }
+            }
+            continue;
+        }
         suppress_dtmf(&mut message.samples, &events);
+        if let Some(digit) = record_target {
+            if let Err(err) = record_mailbox(
+                digit,
+                &args.recordings_dir,
+                SAMPLE_RATE_HZ,
+                &message.samples,
+            ) {
+                eprintln!("mailbox record failed: {}", err);
+            }
+        }
         if let Err(err) = write_recording(&args.recordings_dir, SAMPLE_RATE_HZ, &message.samples) {
             eprintln!("recording failed: {}", err);
         }
@@ -283,32 +333,6 @@ fn collect_event_ranges(len: usize, events: &[(char, usize, usize)]) -> Vec<(usi
         .collect()
 }
 
-fn handle_dtmf_commands(
-    events: &[(char, usize, usize)],
-    message_start: u64,
-    recordings_dir: &std::path::Path,
-    callsign_samples: &[f32],
-    output_tx: &std::sync::mpsc::Sender<Vec<f32>>,
-) {
-    let sequences = split_dtmf_sequences(events, message_start);
-    if !sequences.iter().any(|seq| seq.contains("##")) {
-        return;
-    }
-    let Some(path) = latest_recording_path(recordings_dir) else {
-        eprintln!("dtmf: no recordings found");
-        return;
-    };
-    match read_recording(&path, SAMPLE_RATE_HZ) {
-        Ok(samples) => {
-            let out = build_transmit_message(&samples, callsign_samples, false);
-            let _ = output_tx.send(out);
-        }
-        Err(err) => {
-            eprintln!("dtmf: failed to replay {}: {}", path.display(), err);
-        }
-    }
-}
-
 fn split_dtmf_sequences(events: &[(char, usize, usize)], message_start: u64) -> Vec<String> {
     let mut sequences = Vec::new();
     let mut current = String::new();
@@ -331,4 +355,116 @@ fn split_dtmf_sequences(events: &[(char, usize, usize)], message_start: u64) -> 
         sequences.push(current);
     }
     sequences
+}
+
+fn parse_commands(sequences: &[String]) -> Vec<MailboxCommand> {
+    let mut cmds = Vec::new();
+    for seq in sequences {
+        let chars: Vec<char> = seq.chars().collect();
+        for i in 0..chars.len().saturating_sub(1) {
+            let prefix = chars[i];
+            let digit = chars[i + 1];
+            if !digit.is_ascii_digit() {
+                continue;
+            }
+            let value = digit.to_digit(10).unwrap() as u8;
+            match prefix {
+                '*' => cmds.push(MailboxCommand::Record(value)),
+                '#' => cmds.push(MailboxCommand::Play(value)),
+                _ => {}
+            }
+        }
+        if seq.contains("##") {
+            cmds.push(MailboxCommand::ReplayLast);
+        }
+    }
+    cmds
+}
+
+fn mailbox_path(recordings_dir: &PathBuf, digit: u8) -> PathBuf {
+    recordings_dir.join(format!("mailbox-{}.ogg", digit))
+}
+
+fn record_mailbox(
+    digit: u8,
+    recordings_dir: &PathBuf,
+    sample_rate_hz: f32,
+    samples: &[f32],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (serial, timestamp, secs, nanos) = recording_metadata();
+    let path = mailbox_path(recordings_dir, digit);
+    write_recording_to(&path, sample_rate_hz, samples, serial, &timestamp)?;
+    let ts = format_timestamp_filename(&timestamp, secs, nanos);
+    let stamped = recordings_dir.join(format!("mailbox-{}-{}.ogg", digit, ts));
+    write_recording_to(&stamped, sample_rate_hz, samples, serial, &timestamp)?;
+    Ok(())
+}
+
+fn replay_mailbox(
+    digit: u8,
+    recordings_dir: &PathBuf,
+    callsign_samples: &[f32],
+    output_tx: &std::sync::mpsc::Sender<Vec<f32>>,
+) {
+    let path = mailbox_path(recordings_dir, digit);
+    if !path.exists() {
+        eprintln!("dtmf: mailbox {} is empty", digit);
+        return;
+    }
+    match read_recording(&path, SAMPLE_RATE_HZ) {
+        Ok(samples) => {
+            let out = build_transmit_message(&samples, callsign_samples, false);
+            let _ = output_tx.send(out);
+        }
+        Err(err) => {
+            eprintln!("dtmf: failed to replay {}: {}", path.display(), err);
+        }
+    }
+}
+
+fn replay_latest(
+    recordings_dir: &PathBuf,
+    callsign_samples: &[f32],
+    output_tx: &std::sync::mpsc::Sender<Vec<f32>>,
+) {
+    let Some(path) = latest_recording_path(recordings_dir) else {
+        eprintln!("dtmf: no recordings found");
+        return;
+    };
+    match read_recording(&path, SAMPLE_RATE_HZ) {
+        Ok(samples) => {
+            let out = build_transmit_message(&samples, callsign_samples, false);
+            let _ = output_tx.send(out);
+        }
+        Err(err) => {
+            eprintln!("dtmf: failed to replay {}: {}", path.display(), err);
+        }
+    }
+}
+
+fn send_beep(output_tx: &std::sync::mpsc::Sender<Vec<f32>>) {
+    let samples = generate_beep(
+        SAMPLE_RATE_HZ,
+        MAILBOX_BEEP_FREQ_HZ,
+        MAILBOX_BEEP_SECS,
+        MAILBOX_BEEP_LEVEL,
+    );
+    let _ = output_tx.send(samples);
+}
+
+fn generate_beep(sample_rate_hz: f32, freq_hz: f32, secs: f32, level: f32) -> Vec<f32> {
+    let len = (sample_rate_hz * secs).round() as usize;
+    let ramp_len = (sample_rate_hz * 0.005).round() as usize;
+    let mut out = Vec::with_capacity(len);
+    for i in 0..len {
+        let phase = 2.0 * std::f32::consts::PI * freq_hz * (i as f32) / sample_rate_hz;
+        let mut amp = level;
+        if i < ramp_len {
+            amp *= i as f32 / ramp_len as f32;
+        } else if i + ramp_len > len {
+            amp *= (len - i) as f32 / ramp_len as f32;
+        }
+        out.push(amp * phase.sin());
+    }
+    out
 }

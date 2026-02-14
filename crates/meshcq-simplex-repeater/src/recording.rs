@@ -12,6 +12,17 @@ pub fn write_recording(
     sample_rate_hz: f32,
     samples: &[f32],
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let (serial, timestamp, secs, nanos) = recording_metadata();
+    let filename = format!(
+        "msg-{}.ogg",
+        format_timestamp_filename(&timestamp, secs, nanos)
+    );
+    let path = recordings_dir.join(filename);
+    write_recording_to(&path, sample_rate_hz, samples, serial, &timestamp)?;
+    Ok(path)
+}
+
+pub fn recording_metadata() -> (u32, String, u64, u32) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
@@ -24,12 +35,17 @@ pub fn write_recording(
             .unwrap_or_else(|| format!("{}.{}", now.as_secs(), now.subsec_nanos())),
         Err(_) => format!("{}.{}", now.as_secs(), now.subsec_nanos()),
     };
-    let filename = format!(
-        "msg-{}.ogg",
-        format_timestamp_filename(&timestamp, now.as_secs(), now.subsec_nanos())
-    );
-    let path = recordings_dir.join(filename);
-    let file = std::fs::File::create(&path)?;
+    (serial, timestamp, now.as_secs(), now.subsec_nanos())
+}
+
+pub fn write_recording_to(
+    path: &Path,
+    sample_rate_hz: f32,
+    samples: &[f32],
+    serial: u32,
+    timestamp: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let file = std::fs::File::create(path)?;
     let mut writer = std::io::BufWriter::new(file);
     let mut ogg = ogg::writing::PacketWriter::new(&mut writer);
 
@@ -46,7 +62,7 @@ pub fn write_recording(
         PacketWriteEndInfo::EndPage,
         0,
     )?;
-    let opus_tags = build_opus_tags("meshcq-simplex-repeater", &timestamp);
+    let opus_tags = build_opus_tags("meshcq-simplex-repeater", timestamp);
     ogg.write_packet(
         opus_tags.into_boxed_slice(),
         serial,
@@ -84,7 +100,7 @@ pub fn write_recording(
         )?;
     }
     writer.flush()?;
-    Ok(path)
+    Ok(())
 }
 
 fn build_opus_head(sample_rate_hz: u32, channels: u8, preskip: u16) -> Vec<u8> {
@@ -111,7 +127,7 @@ fn build_opus_tags(vendor: &str, timestamp: &str) -> Vec<u8> {
     tags
 }
 
-fn format_timestamp_filename(timestamp: &str, secs: u64, nanos: u32) -> String {
+pub fn format_timestamp_filename(timestamp: &str, secs: u64, nanos: u32) -> String {
     let format = "[year]-[month]-[day]-[hour][minute][second].[subsecond digits:4]Z";
     let parsed: Result<Vec<FormatItem<'_>>, _> = time::format_description::parse(format);
     if let Ok(items) = parsed {
